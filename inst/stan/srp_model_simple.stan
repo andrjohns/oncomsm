@@ -2,17 +2,17 @@
 
 functions {
 
-  real beta_mix_trunc_lpdf(real p, real mean, real n, real eta, real lower, real upper) {
+  real beta_mix_trunc_lpdf(real p, real mean, real n, real eta, real input_lower, real input_upper) {
     real log_eps = log(1e-6);
     real a = mean * n;
     real b = (1 - mean) * n;
     real log1m_eta = log1m(eta);
     real log_eta = log(eta);
     // normalizing factor (CDF upper - lower)
-    real norm = log_sum_exp(log1m_eta + log_diff_exp(beta_lcdf(upper | a, b), beta_lcdf(lower | a, b)),
-                            log_eta + log(upper - lower));
+    real norm = log_sum_exp(log1m_eta + log_diff_exp(beta_lcdf(input_upper | a, b), beta_lcdf(input_lower | a, b)),
+                            log_eta + log(input_upper - input_lower));
     real lpdf = log_sum_exp(log1m_eta + beta_lpdf(p | a, b), log_eta) - norm;
-    if (p < lower || p > upper) {
+    if (p < input_lower || p > input_upper) {
       reject(p);
     }
     return log_sum_exp(lpdf, log_eps);
@@ -29,26 +29,26 @@ data {
   int<lower=0> N_subjects;
   real<lower=0> maximal_time;
 
-  int<lower=1> subject_id[N];
-  int<lower=1> group_id[N];
-  int<lower=1,upper=2> from[N];
-  int<lower=2,upper=4> to[N]; // 4 := censored
+  array[N] int<lower=1> subject_id;
+  array[N] int<lower=1> group_id;
+  array[N] int<lower=1,upper=2> from;
+  array[N] int<lower=2,upper=4> to; // 4 := censored
 
-  real<lower=0> t_min[N];
-  real<lower=0> t_max[N];
+  array[N] real<lower=0> t_min;
+  array[N] real<lower=0> t_max;
 
   // event probability
-  real<lower=machine_precision(),upper=1-machine_precision()> p_mean[M_groups];
-  real<lower=machine_precision()> p_n[M_groups];
-  real<lower=0.0,upper=1.0> p_eta[M_groups];
-  real<lower=0.0,upper=1.0> p_min[M_groups];
-  real<lower=0.0,upper=1.0> p_max[M_groups];
+  array[M_groups] real<lower=machine_precision(),upper=1-machine_precision()> p_mean;
+  array[M_groups] real<lower=machine_precision()> p_n;
+  array[M_groups] real<lower=0.0,upper=1.0> p_eta;
+  array[M_groups] real<lower=0.0,upper=1.0> p_min;
+  array[M_groups] real<lower=0.0,upper=1.0> p_max;
   // weibull shape
-  real shape_mu[M_groups, 3];
-  real<lower=machine_precision()> shape_sigma[M_groups, 3];
+  array[M_groups, 3] real shape_mu;
+  array[M_groups, 3] real<lower=machine_precision()> shape_sigma;
   // weibull median
-  real median_t_mu[M_groups, 3];
-  real<lower=machine_precision()> median_t_sigma[M_groups, 3];
+  array[M_groups, 3] real median_t_mu;
+  array[M_groups, 3] real<lower=machine_precision()> median_t_sigma;
 
 }
 
@@ -56,9 +56,9 @@ data {
 
 parameters {
 
-  real<lower=0.5> shape[M_groups, 3];
-  real<lower=0,upper=1> p_raw[M_groups]; // the boundaries here are for scaling!
-  real<lower=sqrt(machine_precision())> median_t[M_groups, 3];
+  array[M_groups, 3] real<lower=0.5> shape;
+  array[M_groups] real<lower=0,upper=1> p_raw; // the boundaries here are for scaling!
+  array[M_groups, 3] real<lower=sqrt(machine_precision())> median_t;
 
 }
 
@@ -66,8 +66,8 @@ parameters {
 
 transformed parameters {
 
-  real p[M_groups];
-  real scale[M_groups, 3];
+  array[M_groups] real p;
+  array[M_groups, 3] real scale;
 
   for (g in 1:M_groups) {
     // https://mc-stan.org/docs/2_18/stan-users-guide/vectors-with-varying-bounds.html
@@ -90,7 +90,7 @@ model {
   int s;
   // instead of sampling the actual jumping times, we just approximate them as
   // midpoints
-  real t_jump_from_stable[N_subjects];
+  array[N_subjects] real t_jump_from_stable;
 
   // handle prior contribution to log likelihood target
   for (gg in 1:M_groups) {
@@ -116,22 +116,22 @@ model {
       t_jump_from_stable[s] = (t_min[i] + t_max[i]) / 2;
       if (to[i] == 2) { // stable -> response
         target += log(
-          p[g] * (weibull_cdf(t_max[i] + eps, shape[g, 1], scale[g, 1]) -
-            weibull_cdf(t_min[i] + eps, shape[g, 1], scale[g, 1])) + eps
+          p[g] * (weibull_cdf(t_max[i] + eps | shape[g, 1], scale[g, 1]) -
+            weibull_cdf(t_min[i] + eps | shape[g, 1], scale[g, 1])) + eps
         );
       }
       if (to[i] == 3) { // stable -> progression
         target += log(
-          (1 - p[g]) * (weibull_cdf(t_max[i]+ eps, shape[g, 2], scale[g, 2]) -
-            weibull_cdf(t_min[i]+ eps, shape[g, 2], scale[g, 2])) + eps
+          (1 - p[g]) * (weibull_cdf(t_max[i]+ eps | shape[g, 2], scale[g, 2]) -
+            weibull_cdf(t_min[i]+ eps | shape[g, 2], scale[g, 2])) + eps
         );
       }
       if (to[i] == 4) { // stable -> ??? (still at risk or right censored)
         // here we need to use the mixture distribution since the next state
         // is unknown
         target += log(
-          p[g] * (1 - weibull_cdf(t_min[i]+ eps, shape[g, 1], scale[g, 1])) +
-          (1 - p[g]) * (1 - weibull_cdf(t_min[i]+ eps, shape[g, 2], scale[g, 2])) + eps
+          p[g] * (1 - weibull_cdf(t_min[i]+ eps | shape[g, 1], scale[g, 1])) +
+          (1 - p[g]) * (1 - weibull_cdf(t_min[i]+ eps | shape[g, 2], scale[g, 2])) + eps
         );
       }
     } // end from[i] == "stable"
@@ -145,13 +145,13 @@ model {
       // again adding small eps to avoid 0
       if (to[i] == 3) { // response -> progression
         target += log(
-          weibull_cdf(t_max[i] - t_jump_from_stable[s] + eps, shape[g, 3], scale[g, 3]) -
-          weibull_cdf(t_min[i] - t_jump_from_stable[s] + eps, shape[g, 3], scale[g, 3]) + eps
+          weibull_cdf(t_max[i] - t_jump_from_stable[s] + eps | shape[g, 3], scale[g, 3]) -
+          weibull_cdf(t_min[i] - t_jump_from_stable[s] + eps | shape[g, 3], scale[g, 3]) + eps
         );
       }
       if (to[i] == 4) { // stable -> ??? (still at risk, right censored)
         target += log(
-          1 - weibull_cdf(t_min[i] - t_jump_from_stable[s] + eps, shape[g, 3], scale[g, 3]) + eps
+          1 - weibull_cdf(t_min[i] - t_jump_from_stable[s] + eps | shape[g, 3], scale[g, 3]) + eps
         );
       }
     } // end from[i] == "response"
